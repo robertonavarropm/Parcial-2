@@ -1,194 +1,227 @@
 ﻿using System.Collections;
+using System.Reflection;
 using UnityEngine;
-using UnityEngine.UI; // para UI Text (legacy)
+using UnityEngine.UI; // para el Text (World Space) del estado
 
+[RequireComponent(typeof(CharacterController))]
 public class EnemySoldier : MonoBehaviour
 {
     public enum EnemyState { Normal, Chase, Damage, Dead }
 
-    [Header("Datos (SO)")]
-    [SerializeField] private SoldierSO soldierData;
-
-    [Header("Referencias (asigná en Inspector)")]
-    [SerializeField] private Transform player;        // Tag = Player
-    [SerializeField] private CharacterController cc;  // recomendable
-    [SerializeField] private Canvas worldspaceCanvas; // Canvas World Space hijo
-    [SerializeField] private Text stateText;          // UI Text dentro del canvas
+    [Header("Detección (vectores)")]
+    [SerializeField] private VisionConeDetector detector;      // mismo GameObject
+    [Tooltip("Si ve al jugador o recibe daño, persigue hasta morir.")]
+    [SerializeField] private bool latchAggro = true;
 
     [Header("Movimiento")]
+    [SerializeField] private float moveSpeed = 4f;
     [SerializeField] private float gravity = -9.81f;
 
-    [Header("Comportamiento")]
-    [Tooltip("Aggro permanente: si te ve una vez, persigue hasta morir.")]
-    [SerializeField] private bool latchAggro = true;
-    [SerializeField, Tooltip("Duración visible del estado 'damage' (seg).")]
-    private float damageStateDuration = 0.25f;
+    [Header("Vida del enemigo")]
+    [SerializeField] private int maxHealth = 30;
+    [SerializeField] private int startHealthEnemy = 30;
 
-    [Header("Línea de visión")]
-    [SerializeField, Tooltip("Radio del SphereCast para evitar 'ver por rendijas'")]
-    private float losRadius = 0.12f;
+    [Header("Ataque")]
+    [Tooltip("Daño que aplica al jugador por golpe.")]
+    [SerializeField] private int attackDamage = 10;
+    [Tooltip("Golpes por segundo (1 = un golpe por segundo).")]
+    [SerializeField] private float attackRate = 1.0f;
+    [Tooltip("Alcance del ataque en metros.")]
+    [SerializeField] private float attackRange = 2.5f;
 
+    [Header("Aplicación de daño al Player (ScriptableObject)")]
+    [Tooltip("Arrastrá aquí tu asset PlayerStats_Default.")]
+    [SerializeField] private ScriptableObject playerStatsSO;
+
+    [Header("Player Stats SO (nombres de campos)")]
+    [Tooltip("Campo INT que representa la vida ACTUAL del jugador en tu SO.")]
+    [SerializeField] private string currentHealthField = "startHealth"; // <- tu asset usa 'Start Health'
+    [Tooltip("Campo INT que representa la vida MÁXIMA del jugador en tu SO.")]
+    [SerializeField] private string maxHealthField = "maxHealth";
+
+    [Header("Referencias opcionales")]
+    [SerializeField] private Transform player;            // si está vacío, se toma por Tag "Player"
+    [SerializeField] private Canvas worldspaceCanvas;     // Canvas (World Space) hijo
+    [SerializeField] private Text stateText;              // Text (Legacy) dentro del canvas
+    [SerializeField] private float damageFlashTime = 0.25f;
+
+    // ---- internos ----
+    private CharacterController cc;
     private EnemyState state = EnemyState.Normal;
     private int health;
-    private bool hasAggro = false; // una vez true, no vuelve a false hasta morir/respawn
-    private Vector3 spawnPos;
-    private Quaternion spawnRot;
-    private Coroutine damageBlinkCo;
+    private bool hasAggro = false;             // en cuanto te ve o recibe daño, queda true
+    private Vector3 spawnPos; private Quaternion spawnRot;
+    private float yVelocity;
+    private Coroutine damageCo;
+    private float nextAttackTime = 0f;
 
-    void Reset()
-    {
-        cc = GetComponent<CharacterController>();
-    }
+    // reflexión para PlayerStatsSO
+    private FieldInfo fiCurHP, fiMaxHP;
 
     void Awake()
     {
+        cc = GetComponent<CharacterController>();
         spawnPos = transform.position;
         spawnRot = transform.rotation;
 
-        if (player == null)
+        if (!detector) detector = GetComponent<VisionConeDetector>();
+
+        if (!player)
         {
-            var p = GameObject.FindWithTag("Player");
-            if (p) player = p.transform;
+            if (detector && detector.target) player = detector.target;
+            else
+            {
+                var p = GameObject.FindWithTag("Player");
+                if (p) player = p.transform;
+                if (detector && player) detector.target = player;
+            }
         }
-        if (cc == null) cc = GetComponent<CharacterController>();
-        if (worldspaceCanvas == null) worldspaceCanvas = GetComponentInChildren<Canvas>(true);
-        if (stateText == null && worldspaceCanvas != null) stateText = worldspaceCanvas.GetComponentInChildren<Text>(true);
+
+        if (!worldspaceCanvas) worldspaceCanvas = GetComponentInChildren<Canvas>(true);
+        if (!stateText && worldspaceCanvas) stateText = worldspaceCanvas.GetComponentInChildren<Text>(true);
+
+        // ------- Bind de campos del ScriptableObject del Player -------
+        if (playerStatsSO)
+        {
+            var t = playerStatsSO.GetType();
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+            // 1) Intentar con lo escrito en el Inspector
+            fiCurHP = t.GetField(currentHealthField, flags);
+            fiMaxHP = t.GetField(maxHealthField, flags);
+
+            // 2) Alias comunes si no se encontró
+            if (fiCurHP == null) fiCurHP = FindFirstField(t, new[] { "currentHealth", "startHealth", "hp", "hpActual", "vidaActual" });
+            if (fiMaxHP == null) fiMaxHP = FindFirstField(t, new[] { "maxHealth", "maxHp", "vidaMax", "maxVida" });
+
+            if (fiCurHP == null || fiMaxHP == null)
+                Debug.LogError("[EnemySoldier] No encuentro campos de vida en PlayerStatsSO. Revisá nombres en el Inspector.");
+        }
     }
 
     void Start()
     {
-        if (soldierData == null)
-        {
-            Debug.LogError("[EnemySoldier] Falta SoldierSO asignado.");
-            enabled = false;
-            return;
-        }
-
-        health = Mathf.Clamp(soldierData.startHealth, 0, soldierData.maxHealth);
+        health = Mathf.Clamp(startHealthEnemy, 0, maxHealth);
         SetState(EnemyState.Normal);
-        UpdateStateText();
     }
 
     void Update()
     {
-        // Respawn con F3 (permitido por consigna previa)
-        if (Input.GetKeyDown(KeyCode.F3)) RespawnAtSpawn();
+        // Respawn opcional con F3 (si tu práctica lo permite)
+        if (Input.GetKeyDown(KeyCode.F3)) Respawn();
 
-        if (player == null || state == EnemyState.Dead) return;
+        if (state == EnemyState.Dead || player == null) return;
 
-        // Detección inicial (solo si aún no enganchó)
+        // --- Detección por vectores (ángulo+distancia+LOS) ---
+        bool sees = detector && detector.IsTargetVisible();
+
         if (!hasAggro)
         {
-            if (IsPlayerInVisionCone())
-            {
-                hasAggro = true;          // queda latched
-                SetState(EnemyState.Chase);
-            }
-            else
-            {
-                SetState(EnemyState.Normal);
-            }
+            if (sees) { hasAggro = true; SetState(EnemyState.Chase); }
+            else { SetState(EnemyState.Normal); }
         }
         else
         {
-            // Ya enganchó: no suelta hasta morir
-            if (state != EnemyState.Damage && state != EnemyState.Dead)
-                SetState(EnemyState.Chase);
+            if (state != EnemyState.Damage) SetState(EnemyState.Chase);
         }
 
-        // Movimiento en CHASE
+        // --- Persecución ---
         if (state == EnemyState.Chase)
         {
-            Vector3 toPlayer = player.position - transform.position;
-            toPlayer.y = 0f;
-            Vector3 dir = toPlayer.sqrMagnitude > 0.0001f ? toPlayer.normalized : Vector3.zero;
+            Vector3 to = player.position - transform.position;
+            to.y = 0f;
+            Vector3 dir = to.sqrMagnitude > 0.0001f ? to.normalized : Vector3.zero;
+
+            Vector3 step = dir * moveSpeed;
+            if (cc.isGrounded && yVelocity < 0f) yVelocity = -2f;
+            yVelocity += gravity * Time.deltaTime;
+            step.y = yVelocity;
+
+            cc.Move(step * Time.deltaTime);
 
             if (dir.sqrMagnitude > 0f)
+                transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(dir, Vector3.up), 10f * Time.deltaTime);
+
+            // --- Ataque solo en Chase ---
+            TryAttackPlayer();
+        }
+    }
+
+    // ====== ATAQUE AL JUGADOR ======
+    private void TryAttackPlayer()
+    {
+        if (Time.time < nextAttackTime) return;
+        if (playerStatsSO == null || fiCurHP == null || fiMaxHP == null) return;
+        if (player == null) return;
+
+        // ¿dentro del rango?
+        float eyeH = (detector ? detector.eyeHeight : 1.6f);
+        Vector3 eye = transform.position + Vector3.up * eyeH;
+        Vector3 tgt = player.position + Vector3.up * eyeH;
+        Vector3 dir = (tgt - eye);
+        float dist = dir.magnitude;
+        if (dist > attackRange) return;
+
+        // no pegar si hay pared entre medio (usa Obstacle Mask del detector)
+        bool clear = true;
+        if (detector)
+        {
+            LayerMask obsMask = detector.obstacleMask;
+            if (obsMask != 0 &&
+                Physics.Raycast(new Ray(eye, dir.normalized),
+                                out RaycastHit hit, attackRange, obsMask, QueryTriggerInteraction.Ignore))
             {
-                Vector3 step = dir * soldierData.moveSpeed * Time.deltaTime;
-
-                if (cc != null)
-                {
-                    step.y += gravity * Time.deltaTime;
-                    cc.Move(step);
-                }
-                else
-                {
-                    transform.position += step;
-                }
-
-                transform.rotation = Quaternion.Slerp(
-                    transform.rotation,
-                    Quaternion.LookRotation(dir, Vector3.up),
-                    10f * Time.deltaTime
-                );
+                clear = false; // pared primero
             }
         }
-    }
+        if (!clear) return;
 
-    // ====== DETECCIÓN: cono + LOS bloqueada por estructuras ======
-    private bool IsPlayerInVisionCone()
-    {
-        if (soldierData == null || player == null) return false;
+        // Aplicar daño al SO del jugador
+        int cur = Mathf.Clamp((int)fiCurHP.GetValue(playerStatsSO), 0, int.MaxValue);
+        int max = Mathf.Max(1, (int)fiMaxHP.GetValue(playerStatsSO));
+        if (cur <= 0) return;
 
-        Vector3 eye = transform.position + Vector3.up * soldierData.eyeHeight;
-        Vector3 target = player.position + Vector3.up * 1.6f;
-        Vector3 toPlayer = target - eye;
+        int newCur = Mathf.Clamp(cur - Mathf.Abs(attackDamage), 0, max);
+        fiCurHP.SetValue(playerStatsSO, newCur);
 
-        // 1) Distancia
-        float dist = toPlayer.magnitude;
-        if (dist > soldierData.viewDistance) return false;
+        Debug.Log($"[ENEMY HIT] daño={attackDamage}  playerHP={newCur}/{max}");
 
-        // 2) Ángulo (cono)
-        Vector3 fwd = transform.forward; fwd.y = 0f; fwd.Normalize();
-        Vector3 flat = toPlayer; flat.y = 0f; flat.Normalize();
-        float ang = Vector3.Angle(fwd, flat);
-        if (ang > soldierData.viewHalfAngle) return false;
-
-        // 3) Línea de visión: SOLO Player u Obstáculo (lo que llegue primero manda)
-        int visionMask = soldierData.playerMask | soldierData.obstacleMask;
-        Ray ray = new Ray(eye, toPlayer.normalized);
-
-        if (Physics.SphereCast(ray, losRadius, out RaycastHit hit, dist, visionMask, QueryTriggerInteraction.Ignore))
+        if (newCur <= 0)
         {
-            int hitLayer = hit.collider.gameObject.layer;
-
-            // ¿Fue Player? -> ve al jugador
-            bool hitIsPlayerLayer = ((1 << hitLayer) & soldierData.playerMask) != 0;
-            if (hitIsPlayerLayer) return true;
-
-            // ¿Fue Obstáculo (Wall)? -> bloquea
-            bool hitIsObstacle = ((1 << hitLayer) & soldierData.obstacleMask) != 0;
-            if (hitIsObstacle) return false;
+            Debug.Log("[PLAYER DEAD] el jugador ha muerto.");
+            // acá podrías desactivar input, mostrar UI, recargar escena, etc.
         }
 
-        // Si no chocó ni Player ni Obstáculo, asumimos que no ve
-        return false;
+        nextAttackTime = Time.time + (1f / Mathf.Max(attackRate, 0.01f));
     }
 
-    // ====== DAÑO / MUERTE ======
+    // ====== DAÑO RECIBIDO (aggro por daño del jugador) ======
     public void ApplyDamage(int amount)
     {
         if (state == EnemyState.Dead) return;
 
-        health = Mathf.Clamp(health - Mathf.Max(0, amount), 0, soldierData.maxHealth);
+        health = Mathf.Clamp(health - Mathf.Max(0, amount), 0, maxHealth);
 
-        // Mostrar "damage" un instante
-        if (damageBlinkCo != null) StopCoroutine(damageBlinkCo);
-        damageBlinkCo = StartCoroutine(DamageBlink());
+        // entra en chase si fue atacado por el jugador
+        hasAggro = true;
+        if (state != EnemyState.Damage && state != EnemyState.Dead) SetState(EnemyState.Chase);
+
+        if (damageCo != null) StopCoroutine(damageCo);
+        damageCo = StartCoroutine(DamageFlash());
 
         if (health <= 0) Kill();
     }
 
-    private IEnumerator DamageBlink()
+    private IEnumerator DamageFlash()
     {
+        var prev = state;
         SetState(EnemyState.Damage);
-        yield return new WaitForSeconds(damageStateDuration);
+        yield return new WaitForSeconds(damageFlashTime);
 
         if (state != EnemyState.Dead)
         {
             if (hasAggro && latchAggro) SetState(EnemyState.Chase);
-            else SetState(IsPlayerInVisionCone() ? EnemyState.Chase : EnemyState.Normal);
+            else SetState(EnemyState.Normal);
         }
     }
 
@@ -196,72 +229,51 @@ public class EnemySoldier : MonoBehaviour
     {
         SetState(EnemyState.Dead);
 
-        // Apagar colisiones/visibilidad (mantenemos el canvas para ver "dead")
         if (cc) cc.enabled = false;
         foreach (var col in GetComponentsInChildren<Collider>(true)) col.enabled = false;
         foreach (var r in GetComponentsInChildren<Renderer>(true)) r.enabled = false;
         if (worldspaceCanvas) worldspaceCanvas.enabled = true;
     }
 
-    // ====== ESTADOS + TEXTO ======
     private void SetState(EnemyState newState)
     {
         if (state == newState) return;
         state = newState;
-        UpdateStateText();
-        Debug.Log($"[EnemySoldier] state: {state}");
+        if (stateText) stateText.text = state.ToString().ToLower(); // "normal", "chase", "damage", "dead"
+        // Debug.Log($"[Enemy] state: {state}");
     }
 
-    private void UpdateStateText()
-    {
-        if (!stateText) return;
-        stateText.text = state.ToString().ToLower(); // "normal", "chase", "damage", "dead"
-    }
-
-    // ====== RESPAWN (F3) ======
-    public void RespawnAtSpawn()
+    private void Respawn()
     {
         foreach (var col in GetComponentsInChildren<Collider>(true)) col.enabled = true;
         foreach (var r in GetComponentsInChildren<Renderer>(true)) r.enabled = true;
-        if (cc) cc.enabled = true;
+        if (cc) { cc.enabled = true; yVelocity = 0f; }
 
         transform.SetPositionAndRotation(spawnPos, spawnRot);
-        health = soldierData.maxHealth;
-        hasAggro = false;
-        if (damageBlinkCo != null) { StopCoroutine(damageBlinkCo); damageBlinkCo = null; }
 
+        health = maxHealth;
+        hasAggro = false;
+        if (damageCo != null) { StopCoroutine(damageCo); damageCo = null; }
         SetState(EnemyState.Normal);
         if (worldspaceCanvas) worldspaceCanvas.enabled = true;
     }
 
-    // ====== GIZMOS (cono) ======
+    // ------- Helper: busca el primer campo int con alguno de los nombres -------
+    private FieldInfo FindFirstField(System.Type tt, string[] names)
+    {
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        foreach (var n in names)
+        {
+            var f = tt.GetField(n, flags);
+            if (f != null && f.FieldType == typeof(int)) return f;
+        }
+        return null;
+    }
+
+    // Gizmo de alcance de ataque
     void OnDrawGizmosSelected()
     {
-        if (soldierData == null) return;
-        Gizmos.color = Color.cyan;
-
-        Vector3 eye = transform.position + Vector3.up * soldierData.eyeHeight;
-        Vector3 fwd = transform.forward; fwd.y = 0f; fwd.Normalize();
-
-        Quaternion L = Quaternion.AngleAxis(-soldierData.viewHalfAngle, Vector3.up);
-        Quaternion R = Quaternion.AngleAxis(soldierData.viewHalfAngle, Vector3.up);
-
-        Vector3 left = L * fwd * soldierData.viewDistance;
-        Vector3 right = R * fwd * soldierData.viewDistance;
-
-        Gizmos.DrawLine(eye, eye + left);
-        Gizmos.DrawLine(eye, eye + right);
-
-        int steps = 20;
-        Vector3 prev = eye + left;
-        for (int i = 1; i <= steps; i++)
-        {
-            float t = (float)i / steps;
-            float ang = Mathf.Lerp(-soldierData.viewHalfAngle, soldierData.viewHalfAngle, t);
-            Vector3 dir = Quaternion.AngleAxis(ang, Vector3.up) * fwd * soldierData.viewDistance;
-            Vector3 next = eye + dir;
-            Gizmos.DrawLine(prev, next);
-            prev = next;
-        }
+        Gizmos.color = new Color(1f, 0f, 0f, 0.25f);
+        Gizmos.DrawWireSphere(transform.position, attackRange);
     }
 }

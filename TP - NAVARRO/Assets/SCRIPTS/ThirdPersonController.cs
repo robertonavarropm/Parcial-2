@@ -3,88 +3,79 @@
 [RequireComponent(typeof(CharacterController))]
 public class ThirdPersonController : MonoBehaviour
 {
-    [Header("Referencias")]
-    [SerializeField] private Transform cameraTransform; // arrastrá la Main Camera
-
     [Header("Movimiento")]
-    [SerializeField] private float moveSpeed = 5f;
-    [SerializeField] private float rotationSpeed = 12f;
-    [SerializeField] private float gravity = -20f;
+    public float moveSpeed = 4f;
 
-    [Header("Crouch")]
-    [SerializeField] private bool enableCrouch = true;
-    [SerializeField, Tooltip("x0.75 = -25% velocidad")]
-    private float crouchSpeedMultiplier = 0.75f;
-    [SerializeField, Tooltip("x0.5 = -50% altura del CharacterController")]
-    private float crouchHeightMultiplier = 0.5f;
+    [Header("Crouch (agachado)")]
+    public float crouchSpeedMultiplier = 0.75f; // -25%
+    public float crouchHeightFactor = 0.5f;     // 50% altura
+    public float crouchLerpSpeed = 12f;
 
-    private CharacterController controller;
-    private Vector3 velocity;
+    [Header("Gravedad")]
+    public float gravity = -9.81f;
 
-    private bool isCrouched = false;
-    private float baseHeight;
-    private Vector3 baseCenter;
+    [Header("Cámara")]
+    [SerializeField] private Camera cam; // arrastrá tu cámara; si lo dejás vacío toma la main
+
+    private CharacterController cc;
+    private float yVelocity;
+    private float originalHeight;
+    private Vector3 originalCenter;
 
     void Awake()
     {
-        controller = GetComponent<CharacterController>();
-        if (cameraTransform == null && Camera.main != null)
-            cameraTransform = Camera.main.transform;
-
-        baseHeight = controller.height;
-        baseCenter = controller.center;
+        cc = GetComponent<CharacterController>();
+        originalHeight = cc.height;
+        originalCenter = cc.center;
+        if (!cam && Camera.main) cam = Camera.main;
     }
 
     void Update()
     {
-        // Entrada
-        float h = Input.GetAxis("Horizontal");
-        float v = Input.GetAxis("Vertical");
-        Vector2 input = Vector2.ClampMagnitude(new Vector2(h, v), 1f);
+        // --- Entrada WASD ---
+        float h = Input.GetAxisRaw("Horizontal");
+        float v = Input.GetAxisRaw("Vertical");
+        Vector3 input = new Vector3(h, 0f, v);
+        input = Vector3.ClampMagnitude(input, 1f);
 
-        // Dirección relativa a cámara
-        Vector3 camF = cameraTransform ? cameraTransform.forward : Vector3.forward;
-        camF.y = 0f; camF.Normalize();
-        Vector3 camR = cameraTransform ? cameraTransform.right : Vector3.right;
-        camR.y = 0f; camR.Normalize();
-        Vector3 moveDir = camF * input.y + camR * input.x;
-
-        // Crouch con C (toggle)
-        if (enableCrouch && Input.GetKeyDown(KeyCode.C))
+        // --- Dirección en espacio de CÁMARA (soluciona inversión) ---
+        Vector3 moveDir = Vector3.zero;
+        if (cam)
         {
-            isCrouched = !isCrouched;
-            ApplyCrouch(isCrouched);
-        }
-
-        // Velocidad
-        float currentSpeed = isCrouched ? moveSpeed * crouchSpeedMultiplier : moveSpeed;
-
-        // Rotación
-        if (moveDir.sqrMagnitude > 0.0001f)
-        {
-            Quaternion targetRot = Quaternion.LookRotation(moveDir, Vector3.up);
-            transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, rotationSpeed * Time.deltaTime);
-        }
-
-        // Gravedad y movimiento
-        if (controller.isGrounded && velocity.y < 0f) velocity.y = -2f;
-        velocity.y += gravity * Time.deltaTime;
-
-        Vector3 horizontal = moveDir * currentSpeed;
-        controller.Move((horizontal + velocity) * Time.deltaTime);
-    }
-
-    private void ApplyCrouch(bool crouch)
-    {
-        if (crouch)
-        {
-            controller.height = baseHeight * Mathf.Clamp01(crouchHeightMultiplier); // 50%
-            controller.center = new Vector3(baseCenter.x, baseCenter.y * crouchHeightMultiplier, baseCenter.z);
+            Vector3 camF = cam.transform.forward; camF.y = 0f; camF.Normalize();
+            Vector3 camR = cam.transform.right; camR.y = 0f; camR.Normalize();
+            moveDir = camF * input.z + camR * input.x;
         }
         else
         {
-            controller.height = baseHeight;
-            controller.center = baseCenter;
+            // fallback: espacio mundo Z/X
+            moveDir = new Vector3(input.x, 0f, input.z);
         }
+
+        // --- Agachado (mantener C o Ctrl) ---
+        bool crouching = Input.GetKey(KeyCode.C) ||
+                         Input.GetKey(KeyCode.LeftControl) ||
+                         Input.GetKey(KeyCode.RightControl);
+
+        float speed = moveSpeed * (crouching ? crouchSpeedMultiplier : 1f);
+
+        // --- Movimiento horizontal ---
+        Vector3 velocity = moveDir * speed;
+
+        // --- Gravedad / suelo (sin salto) ---
+        if (cc.isGrounded && yVelocity < 0f) yVelocity = -2f;
+        yVelocity += gravity * Time.deltaTime;
+        velocity.y = yVelocity;
+
+        cc.Move(velocity * Time.deltaTime);
+
+        // --- Transición suave de altura/centro al agacharse ---
+        float targetHeight = crouching ? originalHeight * crouchHeightFactor : originalHeight;
+        Vector3 targetCenter = crouching
+            ? new Vector3(originalCenter.x, originalCenter.y * crouchHeightFactor, originalCenter.z)
+            : originalCenter;
+
+        cc.height = Mathf.Lerp(cc.height, targetHeight, Time.deltaTime * crouchLerpSpeed);
+        cc.center = Vector3.Lerp(cc.center, targetCenter, Time.deltaTime * crouchLerpSpeed);
     }
 }
