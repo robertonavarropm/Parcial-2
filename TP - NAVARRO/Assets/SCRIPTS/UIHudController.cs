@@ -8,35 +8,54 @@ public class UIHudController : MonoBehaviour
     [SerializeField] private Text ammoText;
     [SerializeField] private Text healthText;
 
-    [Header("Lógica")]
-    [SerializeField] private GunSemiAuto gun;                 // ← tu arma
-    [SerializeField] private ScriptableObject playerStats;    // ← tu SO de stats (opcional para HP)
+    [Header("Arma")]
+    [SerializeField] private GunSemiAuto gun;   // arrastrá el componente GunSemiAuto
 
-    FieldInfo fiCurrentHealth, fiMaxHealth;
+    [Header("Player Stats (ScriptableObject)")]
+    [SerializeField] private ScriptableObject playerStatsSO; // PlayerStats_Default
+    [SerializeField] private string currentHealthField = "startHealth"; // tus nombres
+    [SerializeField] private string maxHealthField = "maxHealth";
+
+    private FieldInfo fiCurHP, fiMaxHP;
 
     void Awake()
     {
         if (!gun) gun = FindObjectOfType<GunSemiAuto>();
 
-        if (playerStats != null)
+        if (playerStatsSO)
         {
-            var t = playerStats.GetType();
-            fiCurrentHealth = t.GetField("currentHealth", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            fiMaxHealth = t.GetField("maxHealth", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var t = playerStatsSO.GetType();
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+            fiCurHP = t.GetField(currentHealthField, flags);
+            fiMaxHP = t.GetField(maxHealthField, flags);
+
+            if (fiCurHP == null) fiCurHP = FindFirstField(t, new[] { "currentHealth", "startHealth", "hp", "hpActual", "vidaActual" });
+            if (fiMaxHP == null) fiMaxHP = FindFirstField(t, new[] { "maxHealth", "maxHp", "vidaMax", "maxVida" });
         }
     }
 
     void Update()
     {
-        // ⚠️ CAMBIO CLAVE: usar las propiedades que sí se actualizan en tu arma
         if (gun && ammoText)
             ammoText.text = $"Ammo: {gun.Bullets}/{gun.MagSize}";
 
-        if (playerStats && healthText && fiCurrentHealth != null && fiMaxHealth != null)
+        if (playerStatsSO && healthText && fiCurHP != null && fiMaxHP != null)
         {
-            int cur = Mathf.Clamp((int)fiCurrentHealth.GetValue(playerStats), 0, int.MaxValue);
-            int max = Mathf.Max(1, (int)fiMaxHealth.GetValue(playerStats));
+            int cur = Mathf.Clamp((int)fiCurHP.GetValue(playerStatsSO), 0, int.MaxValue);
+            int max = Mathf.Max(1, (int)fiMaxHP.GetValue(playerStatsSO));
             healthText.text = $"HP: {cur}/{max}";
         }
+    }
+
+    private FieldInfo FindFirstField(System.Type tt, string[] names)
+    {
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        foreach (var n in names)
+        {
+            var f = tt.GetField(n, flags);
+            if (f != null && f.FieldType == typeof(int)) return f;
+        }
+        return null;
     }
 }

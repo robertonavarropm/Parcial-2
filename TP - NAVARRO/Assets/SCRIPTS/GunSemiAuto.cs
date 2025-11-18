@@ -65,16 +65,17 @@ public class GunSemiAuto : MonoBehaviour
         Ray ray = new Ray(cam.transform.position, cam.transform.forward);
         if (Physics.Raycast(ray, out RaycastHit hit, range, hitMask, QueryTriggerInteraction.Ignore))
         {
-            var enemy = hit.collider.GetComponentInParent<EnemySoldier>();
-            if (enemy != null)
+            var dmg = hit.collider.GetComponentInParent<IDamageable>();
+            if (dmg != null)
             {
-                enemy.ApplyDamage(damage);
-                Debug.Log($"[GUN] Hit enemy por {damage}. Balas: {bulletsInMag}/{magazineSize}");
+                dmg.ApplyDamage(damage);
+                Debug.Log($"[GUN] Hit damage {damage}. Balas: {bulletsInMag}/{magazineSize}");
             }
             else
             {
                 Debug.Log($"[GUN] Hit {hit.collider.name}. Balas: {bulletsInMag}/{magazineSize}");
             }
+
         }
 
         // debug rayo
@@ -109,4 +110,11 @@ public class GunSemiAuto : MonoBehaviour
     public int magCapacity = 15;
     public int currentAmmo = 15;
 
+    public void RefillFull()
+    {
+        // recarga “cargadores ilimitados”: llena el cargador actual
+        // usa tus mismas variables internas
+        bulletsInMag = magazineSize;
+        Debug.Log($"[GUN] RefillFull -> {bulletsInMag}/{magazineSize}");
+    }
 }
