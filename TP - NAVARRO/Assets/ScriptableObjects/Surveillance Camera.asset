@@ -12,7 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3213caaf3d46d1d45b86cd76022cd427, type: 3}
   m_Name: Surveillance Camera
   m_EditorClassIdentifier: 
-  maxHealth: 30
+  maxHealth: 100
   viewAngleDegTotal: 60
   viewDistance: 5
   eyeHeight: 2
