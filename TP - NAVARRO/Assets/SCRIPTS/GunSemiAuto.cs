@@ -1,7 +1,6 @@
 using UnityEngine;
 
 public class GunSemiAuto : MonoBehaviour
-
 {
     [Header("Daño & Rango")]
     [SerializeField] private int damage = 10;
@@ -15,14 +14,14 @@ public class GunSemiAuto : MonoBehaviour
     [SerializeField] private int magazineSize = 15;
     [SerializeField] private int bulletsInMag = 15; // actual
     [SerializeField] private KeyCode reloadKey = KeyCode.R;
-    private bool isReloading = false; // por si luego agregás tiempo de recarga
+    private bool isReloading = false;
 
     [Header("Referencias")]
     [SerializeField] private Camera cam;
     [SerializeField] private Transform muzzle;
 
     [Header("Layers")]
-    [SerializeField] private LayerMask hitMask = ~0;
+    [SerializeField] private LayerMask hitMask = ~0; // tildá la Layer del ENEMY
 
     void Awake()
     {
@@ -32,17 +31,8 @@ public class GunSemiAuto : MonoBehaviour
 
     void Update()
     {
-        // recargar
-        if (Input.GetKeyDown(reloadKey))
-        {
-            TryReload();
-        }
-
-        // disparar (semi-auto)
-        if (Input.GetMouseButtonDown(0))
-        {
-            TryFire();
-        }
+        if (Input.GetKeyDown(reloadKey)) TryReload();
+        if (Input.GetMouseButtonDown(0)) TryFire();
     }
 
     private void TryFire()
@@ -50,7 +40,6 @@ public class GunSemiAuto : MonoBehaviour
         if (Time.time < nextFireTime) return;
         if (isReloading) return;
 
-        // sin balas => no dispara
         if (bulletsInMag <= 0)
         {
             Debug.Log("[GUN] Sin balas, recargar con R.");
@@ -58,62 +47,78 @@ public class GunSemiAuto : MonoBehaviour
         }
 
         nextFireTime = Time.time + (1f / fireRate);
-
-        // consumir bala
         bulletsInMag--;
 
-        Ray ray = new Ray(cam.transform.position, cam.transform.forward);
-        if (Physics.Raycast(ray, out RaycastHit hit, range, hitMask, QueryTriggerInteraction.Ignore))
+        Vector3 origin = cam ? cam.transform.position : transform.position;
+        Vector3 dir = cam ? cam.transform.forward : transform.forward;
+
+        bool hitSomething = false;
+
+        // SphereCast finito (mejor pega a cápsulas)
+        if (Physics.SphereCast(new Ray(origin, dir), 0.05f, out RaycastHit hit, range, hitMask, QueryTriggerInteraction.Collide))
         {
-            var dmg = hit.collider.GetComponentInParent<IDamageable>();
-            if (dmg != null)
+            hitSomething = true;
+            ApplyDamageIfPossible(hit);
+        }
+        else if (Physics.Raycast(origin, dir, out RaycastHit hit2, range, hitMask, QueryTriggerInteraction.Collide))
+        {
+            hitSomething = true;
+            ApplyDamageIfPossible(hit2);
+        }
+
+        if (!hitSomething)
+            Debug.Log("[GUN] No hit (revisá máscaras/capas/rango)");
+
+        if (muzzle != null) Debug.DrawRay(muzzle.position, dir * range, Color.red, 0.2f);
+        else Debug.DrawRay(origin, dir * range, Color.red, 0.2f);
+    }
+
+    private void ApplyDamageIfPossible(RaycastHit hit)
+    {
+        var go = hit.collider.gameObject;
+        Debug.Log($"[GUN] Hit '{go.name}' (layer={LayerMask.LayerToName(go.layer)})");
+
+        var dmg = go.GetComponentInParent<IDamageable>();
+        if (dmg != null)
+        {
+            dmg.ApplyDamage(damage);
+            Debug.Log($"[GUN] Damage {damage}. Balas: {bulletsInMag}/{magazineSize}");
+        }
+        else
+        {
+            // Fallback por si olvidaste poner IDamageable en el enemigo
+            var soldier = go.GetComponentInParent<EnemySoldier>();
+            if (soldier != null)
             {
-                dmg.ApplyDamage(damage);
-                Debug.Log($"[GUN] Hit damage {damage}. Balas: {bulletsInMag}/{magazineSize}");
+                soldier.ApplyDamage(damage);
+                Debug.Log($"[GUN] Damage (fallback EnemySoldier) {damage}. Balas: {bulletsInMag}/{magazineSize}");
             }
             else
             {
-                Debug.Log($"[GUN] Hit {hit.collider.name}. Balas: {bulletsInMag}/{magazineSize}");
+                Debug.Log($"[GUN] Impacto en '{go.name}' sin IDamageable.");
             }
-
         }
-
-        // debug rayo
-        if (muzzle != null) Debug.DrawRay(muzzle.position, cam.transform.forward * range, Color.red, 0.2f);
-        else Debug.DrawRay(cam.transform.position, cam.transform.forward * range, Color.red, 0.2f);
     }
 
     private void TryReload()
     {
         if (isReloading) return;
-
         if (bulletsInMag >= magazineSize)
         {
             Debug.Log("[GUN] Cargador completo, no se puede recargar.");
             return;
         }
-
-        // cargadores ilimitados: recarga instantánea al máximo
         bulletsInMag = magazineSize;
         Debug.Log($"[GUN] Recargado. Balas: {bulletsInMag}/{magazineSize}");
     }
 
-    // setters opcionales
-    public void SetDamage(int d) => damage = Mathf.Max(0, d);
-    public void SetRange(float r) => range = Mathf.Max(0f, r);
-    public void SetFireRate(float rps) => fireRate = Mathf.Max(0.1f, rps);
-
-    // getters útiles por si querés UI
+    // getters para UI
     public int Bullets => bulletsInMag;
     public int MagSize => magazineSize;
 
-    public int magCapacity = 15;
-    public int currentAmmo = 15;
-
+    // usado por el respawn
     public void RefillFull()
     {
-        // recarga “cargadores ilimitados”: llena el cargador actual
-        // usa tus mismas variables internas
         bulletsInMag = magazineSize;
         Debug.Log($"[GUN] RefillFull -> {bulletsInMag}/{magazineSize}");
     }
