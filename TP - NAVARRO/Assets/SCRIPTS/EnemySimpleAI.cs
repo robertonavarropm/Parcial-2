@@ -8,13 +8,17 @@ public class EnemySoldier : MonoBehaviour, IDamageable
 {
     public enum EnemyState { Normal, Chase, Damage, Dead }
 
-    [Header("Detección (tu detector de cono)")]
+    [Header("Player (ASIGNAR en Inspector)")]
+    [SerializeField] private Transform player;  // 👈 arrastrá el Player aquí
+
+    [Header("Detección (vectores)")]
     [SerializeField] private VisionConeDetector detector;
-    [SerializeField] private bool latchAggro = true;
+    [SerializeField] private bool latchAggro = true;   // si te vio o lo dañaste, no suelta
 
     [Header("Movimiento")]
     [SerializeField] private float moveSpeed = 4f;
     [SerializeField] private float gravity = -9.81f;
+    [SerializeField] private float turnSpeedDeg = 720f; // °/s
 
     [Header("Vida del enemigo")]
     [SerializeField] private int maxHealth = 30;
@@ -22,8 +26,9 @@ public class EnemySoldier : MonoBehaviour, IDamageable
 
     [Header("Ataque")]
     [SerializeField] private int attackDamage = 10;
-    [SerializeField] private float attackRate = 1.0f;
+    [SerializeField] private float attackRate = 1.0f;   // golpes/seg
     [SerializeField] private float attackRange = 2.5f;
+    [SerializeField] private bool requireDetectorSeeToAttack = false; // si querés exigir cono
 
     [Header("Player Stats (ScriptableObject)")]
     [SerializeField] private ScriptableObject playerStatsSO; // PlayerStats_Default
@@ -45,9 +50,19 @@ public class EnemySoldier : MonoBehaviour, IDamageable
     private Coroutine damageCo;
     private float nextAttackTime = 0f;
 
-    // player / stats
-    private Transform player;
+    // reflexión player stats
     private FieldInfo fiCurHP, fiMaxHP;
+
+    // ---------- Helpers ----------
+    private float EyeHeight => detector ? detector.eyeHeight : 1.6f;
+    private Vector3 EyePos => transform.position + Vector3.up * EyeHeight;
+    private Vector3 PlayerEyePos => (player ? player.position : Vector3.zero) + Vector3.up * EyeHeight;
+
+    void OnValidate()
+    {
+        // Mantener el detector apuntando al mismo player del inspector
+        if (detector && player) detector.target = player;
+    }
 
     void Awake()
     {
@@ -55,9 +70,6 @@ public class EnemySoldier : MonoBehaviour, IDamageable
         spawnPos = transform.position; spawnRot = transform.rotation;
 
         if (!detector) detector = GetComponent<VisionConeDetector>();
-
-        var pGo = GameObject.FindWithTag("Player");
-        if (pGo) player = pGo.transform;
         if (detector && player) detector.target = player;
 
         if (!worldspaceCanvas) worldspaceCanvas = GetComponentInChildren<Canvas>(true);
@@ -81,7 +93,10 @@ public class EnemySoldier : MonoBehaviour, IDamageable
     void Update()
     {
         if (Input.GetKeyDown(KeyCode.F3)) Respawn();
-        if (state == EnemyState.Dead || player == null) return;
+
+        // seguridad: si no hay player asignado, no hacemos nada
+        if (!player) { SetState(EnemyState.Normal); return; }
+        if (state == EnemyState.Dead) return;
 
         bool sees = detector && detector.IsTargetVisible();
 
@@ -97,38 +112,51 @@ public class EnemySoldier : MonoBehaviour, IDamageable
 
         if (state == EnemyState.Chase)
         {
-            Vector3 to = player.position - transform.position; to.y = 0f;
-            Vector3 dir = to.sqrMagnitude > 0.0001f ? to.normalized : Vector3.zero;
-
-            Vector3 step = dir * moveSpeed;
-            if (cc.isGrounded && yVelocity < 0f) yVelocity = -2f;
-            yVelocity += gravity * Time.deltaTime;
-            step.y = yVelocity;
-
-            cc.Move(step * Time.deltaTime);
-
-            if (dir.sqrMagnitude > 0f)
-                transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(dir, Vector3.up), 10f * Time.deltaTime);
-
-            TryAttackPlayer();
+            ChaseMove();
+            TryAttackPlayer(sees);
         }
     }
 
-    private void TryAttackPlayer()
+    private void ChaseMove()
+    {
+        if (!player) return;
+
+        Vector3 to = player.position - transform.position;
+        to.y = 0f;
+        if (to.sqrMagnitude < 0.0001f) return;
+
+        Vector3 dir = to.normalized;
+
+        // giro suave hacia el jugador
+        Quaternion desired = Quaternion.LookRotation(dir, Vector3.up);
+        transform.rotation = Quaternion.RotateTowards(
+            transform.rotation, desired, turnSpeedDeg * Time.deltaTime);
+
+        // movimiento hacia el jugador
+        Vector3 vel = dir * moveSpeed;
+        if (cc.isGrounded && yVelocity < 0f) yVelocity = -2f;
+        yVelocity += gravity * Time.deltaTime;
+        vel.y = yVelocity;
+
+        cc.Move(vel * Time.deltaTime);
+    }
+
+    private void TryAttackPlayer(bool seesNow)
     {
         if (Time.time < nextAttackTime) return;
-        if (playerStatsSO == null || fiCurHP == null || fiMaxHP == null || player == null) return;
+        if (playerStatsSO == null || fiCurHP == null || fiMaxHP == null || !player) return;
 
-        float eyeH = (detector ? detector.eyeHeight : 1.6f);
-        Vector3 eye = transform.position + Vector3.up * eyeH;
-        Vector3 tgt = player.position + Vector3.up * eyeH;
-        Vector3 dir = (tgt - eye);
+        // Exigir cono si lo marcaste
+        if (requireDetectorSeeToAttack && !(detector && seesNow)) return;
+
+        // Rango
+        Vector3 dir = PlayerEyePos - EyePos;
         float dist = dir.magnitude;
         if (dist > attackRange) return;
 
-        // pared bloquea
+        // LOS (pared bloquea)
         if (detector && detector.obstacleMask != 0 &&
-            Physics.Raycast(new Ray(eye, dir.normalized), out RaycastHit hit, attackRange, detector.obstacleMask, QueryTriggerInteraction.Ignore))
+            Physics.Raycast(EyePos, dir.normalized, out RaycastHit hit, attackRange, detector.obstacleMask, QueryTriggerInteraction.Ignore))
             return;
 
         int cur = Mathf.Clamp((int)fiCurHP.GetValue(playerStatsSO), 0, int.MaxValue);
@@ -141,7 +169,6 @@ public class EnemySoldier : MonoBehaviour, IDamageable
 
         if (newCur <= 0)
         {
-            Debug.Log("[PLAYER DEAD] el jugador ha muerto.");
             var death = FindObjectOfType<PlayerDeathHandler>();
             if (death) death.OnKilledByEnemy();
         }
@@ -149,13 +176,14 @@ public class EnemySoldier : MonoBehaviour, IDamageable
         nextAttackTime = Time.time + (1f / Mathf.Max(attackRate, 0.01f));
     }
 
-    // === ESTA ES LA FUNCIÓN QUE NECESITÁS PÚBLICA ===
+    // ===== IDamageable =====
     public void ApplyDamage(int amount)
     {
         if (state == EnemyState.Dead) return;
-
         health = Mathf.Clamp(health - Mathf.Max(0, amount), 0, maxHealth);
-        hasAggro = true; // aggro por daño
+
+        // aggro por daño
+        hasAggro = true;
 
         if (damageCo != null) StopCoroutine(damageCo);
         damageCo = StartCoroutine(DamageFlash());
@@ -195,6 +223,9 @@ public class EnemySoldier : MonoBehaviour, IDamageable
         if (damageCo != null) { StopCoroutine(damageCo); damageCo = null; }
         SetState(EnemyState.Normal);
         if (worldspaceCanvas) worldspaceCanvas.enabled = true;
+
+        // volver a sincronizar detector
+        if (detector && player) detector.target = player;
     }
 
     private void SetState(EnemyState s)
